@@ -1,42 +1,53 @@
-function doGet(e) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet();
-  const action = e?.parameter?.action;
+// tracker.js - Runs on GitHub Actions every 10 minutes
+const SHEET_URL = process.env.SHEET_URL;
+
+async function fetchBazaar() {
+  const response = await fetch('https://blacket.org/worker/bazaar');
+  const data = await response.json();
   
-  if (action === 'getPrices') {
-    const data = sheet.getSheetByName('prices').getDataRange().getValues();
-    return ContentService.createTextOutput(JSON.stringify(data.slice(1))).setMimeType(ContentService.MimeType.JSON);
+  let listings = [];
+  if (Array.isArray(data)) listings = data;
+  else if (data.bazaar) listings = Object.values(data.bazaar);
+  else {
+    for (let k in data) {
+      if (Array.isArray(data[k])) { listings = data[k]; break; }
+    }
   }
   
-  if (action === 'getSales') {
-    const data = sheet.getSheetByName('sales').getDataRange().getValues();
-    return ContentService.createTextOutput(JSON.stringify(data.slice(1))).setMimeType(ContentService.MimeType.JSON);
+  // Filter troll prices (>100,000)
+  const validListings = listings.filter(l => {
+    const price = Number(l.price || 0);
+    return price > 0 && price < 100000;
+  });
+  
+  // Group by blook to calculate averages
+  const blookPrices = {};
+  validListings.forEach(l => {
+    const name = l.item || l.blook || l.name;
+    const price = Number(l.price || 0);
+    if (!blookPrices[name]) blookPrices[name] = [];
+    blookPrices[name].push(price);
+  });
+  
+  // Send averages to Google Sheets
+  for (const [blook, prices] of Object.entries(blookPrices)) {
+    const avg = prices.reduce((a,b) => a + b, 0) / prices.length;
+    const url = `${SHEET_URL}?action=addPrice&blook=${encodeURIComponent(blook)}&avg=${avg}&count=${prices.length}`;
+    await fetch(url).catch(e => console.log('Error saving price:', blook));
   }
   
-  if (action === 'getListings') {
-    const data = sheet.getSheetByName('listings').getDataRange().getValues();
-    return ContentService.createTextOutput(JSON.stringify(data.slice(1))).setMimeType(ContentService.MimeType.JSON);
-  }
+  // Send all listings to Google Sheets
+  const listingsData = validListings.map(l => ({
+    blook: l.item || l.blook || l.name,
+    price: Number(l.price || 0),
+    seller: l.seller || l.username || '?',
+    qty: l.quantity || 1
+  }));
   
-  if (action === 'addPrice') {
-    const sheetName = sheet.getSheetByName('prices');
-    sheetName.appendRow([new Date().toISOString(), e.parameter.blook, e.parameter.avg, e.parameter.count]);
-    return ContentService.createTextOutput('ok');
-  }
+  const url = `${SHEET_URL}?action=addListings&data=${encodeURIComponent(JSON.stringify(listingsData))}`;
+  await fetch(url).catch(e => console.log('Error saving listings'));
   
-  if (action === 'addSale') {
-    const sheetName = sheet.getSheetByName('sales');
-    sheetName.appendRow([new Date().toISOString(), e.parameter.blook, e.parameter.price, e.parameter.seller]);
-    return ContentService.createTextOutput('ok');
-  }
-  
-  if (action === 'addListings') {
-    const sheetName = sheet.getSheetByName('listings');
-    const listings = JSON.parse(e.parameter.data);
-    listings.forEach(l => {
-      sheetName.appendRow([new Date().toISOString(), l.blook, l.price, l.seller, l.qty]);
-    });
-    return ContentService.createTextOutput('ok');
-  }
-  
-  return ContentService.createTextOutput('invalid');
+  console.log(`Tracked ${validListings.length} listings, ${Object.keys(blookPrices).length} unique blooks`);
 }
+
+fetchBazaar();
